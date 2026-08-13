@@ -1,6 +1,7 @@
 package com.code5150
 
 import com.code5150.dto.ArticleDTO
+import com.code5150.dto.ArticleSearchResult
 import com.code5150.mapper.toDto
 import com.code5150.service.ArticleService
 import jakarta.ws.rs.Consumes
@@ -9,6 +10,7 @@ import jakarta.ws.rs.PUT
 import jakarta.ws.rs.Path
 import jakarta.ws.rs.PathParam
 import jakarta.ws.rs.Produces
+import jakarta.ws.rs.QueryParam
 import jakarta.ws.rs.core.MediaType
 import org.jboss.resteasy.reactive.RestResponse
 
@@ -28,6 +30,17 @@ class ArticleController(
     @Produces(MediaType.APPLICATION_JSON)
     suspend fun createArticle(article: ArticleDTO): RestResponse<ArticleDTO> {
         return RestResponse.ok(articleService.addArticle(article).toDto())
+    }
+
+    @GET
+    @Path("/search")
+    @Produces(MediaType.APPLICATION_JSON)
+    suspend fun searchArticles(
+        @QueryParam("q") q: String?,
+        @QueryParam("page") page: Int?,
+        @QueryParam("size") size: Int?
+    ): ArticleSearchResult {
+        return articleService.search(q ?: "", page ?: 0, size ?: 20)
     }
 
     @GET
