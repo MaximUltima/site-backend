@@ -1,0 +1,24 @@
+greeting:
+  message: "hello"
+
+quarkus:
+  datasource:
+    db-kind: postgresql
+    username: postgres
+    password: Us3r1pa55w0rd
+    jdbc:
+      url: jdbc:postgresql://localhost:5432/site
+    reactive:
+      max-size: 17
+      url: vertx-reactive:postgresql://localhost:5432/site
+  liquibase:
+    migrate-at-start: true
+    change-log: db/changelog.xml
+  hibernate-orm:
+    blocking: false
+    schema-management:
+      strategy: none
+
+
+
+
