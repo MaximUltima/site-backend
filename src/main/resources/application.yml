@@ -26,6 +26,8 @@ quarkus:
   jackson:
     # Даты — строками ISO 8601, а не числами
     write-dates-as-timestamps: false
+    # status можно присылать и как "published", и как "PUBLISHED"
+    accept-case-insensitive-enums: true
 
 # Адреса, секреты и пути сайта (docs/api.md, разделы 4–5)
 site:
