@@ -22,6 +22,9 @@ dependencies {
     implementation("io.quarkus:quarkus-smallrye-openapi")
 
     implementation("io.quarkus:quarkus-rest-jackson")
+    implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
+    // /q/health — для healthcheck в docker-compose
+    implementation("io.quarkus:quarkus-smallrye-health")
 
     implementation("io.quarkus:quarkus-hibernate-reactive-panache-kotlin")
     implementation("io.quarkus:quarkus-reactive-pg-client")
@@ -51,6 +54,7 @@ allOpen {
     annotation("jakarta.ws.rs.Path")
     annotation("jakarta.enterprise.context.ApplicationScoped")
     annotation("jakarta.persistence.Entity")
+    annotation("jakarta.persistence.MappedSuperclass")
     annotation("io.quarkus.test.junit.QuarkusTest")
 }
 

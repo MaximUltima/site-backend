@@ -1,16 +1,17 @@
-greeting:
-  message: "hello"
+# Настройки бэкенда. Всё, что зависит от окружения, приходит из переменных:
+# секретов в репозитории нет. Для разработки и тестов — значения по умолчанию
+# в профилях %dev и %test ниже.
 
 quarkus:
   datasource:
     db-kind: postgresql
-    username: postgres
-    password: Us3r1pa55w0rd
+    username: ${DB_USER:site}
+    password: ${DB_PASSWORD}
     jdbc:
-      url: jdbc:postgresql://localhost:5432/site
+      url: ${DB_JDBC_URL:jdbc:postgresql://localhost:5432/site}
     reactive:
       max-size: 17
-      url: vertx-reactive:postgresql://localhost:5432/site
+      url: ${DB_REACTIVE_URL:postgresql://localhost:5432/site}
   liquibase:
     migrate-at-start: true
     change-log: db/changelog.xml
@@ -18,7 +19,50 @@ quarkus:
     blocking: false
     schema-management:
       strategy: none
+  http:
+    # Загрузка картинок в медиатеку
+    limits:
+      max-body-size: 25M
+  jackson:
+    # Даты — строками ISO 8601, а не числами
+    write-dates-as-timestamps: false
 
+# Адреса, секреты и пути сайта (docs/api.md, разделы 4–5)
+site:
+  # Куда стучаться после публикации, чтобы фронт сбросил кэш. Пусто — не стучимся.
+  revalidate-url: ${SITE_REVALIDATE_URL:}
+  revalidate-secret: ${REVALIDATE_SECRET:}
 
+admin:
+  # Токены доступа к /api/admin/v1 через запятую. Пусто — админское API закрыто.
+  # Временная схема до входа по логину и паролю (docs/admin-plan.md, этап A2).
+  tokens: ${ADMIN_TOKENS:}
 
+media:
+  # Каталог, куда складываются загруженные файлы, и адрес, по которому их раздаёт прокси.
+  dir: ${MEDIA_DIR:./media}
+  url: ${MEDIA_URL:http://localhost:8080/media}
 
+"%dev":
+  quarkus:
+    datasource:
+      password: ${DB_PASSWORD:site}
+  admin:
+    tokens: ${ADMIN_TOKENS:dev-token}
+
+"%test":
+  quarkus:
+    datasource:
+      password: ${DB_PASSWORD:site}
+      jdbc:
+        url: ${TEST_DB_JDBC_URL:jdbc:postgresql://localhost:5432/site_test}
+      reactive:
+        url: ${TEST_DB_REACTIVE_URL:postgresql://localhost:5432/site_test}
+    liquibase:
+      # Каждый прогон тестов — с чистой базы
+      clean-at-start: true
+  admin:
+    tokens: test-token
+  media:
+    dir: build/test-media
+    url: https://media.test

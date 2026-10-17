@@ -1,4 +1,54 @@
-# site-project
+# site-backend
+
+Бэкенд сайта «Милитант»: Quarkus 3, Kotlin, Hibernate Reactive Panache, PostgreSQL, Liquibase.
+
+Контракт API — `docs/api.md` и `docs/openapi.yaml` в общем каталоге проекта (рядом с `frontend/`). Ответы публичного API совпадают с типами фронта `frontend/src/lib/api/types.ts` поле в поле.
+
+## Что есть
+
+| Часть | Пути |
+|---|---|
+| Публичное API, только опубликованное | `GET /api/v1/home`, `/news`, `/news/{slug}`, `/articles`, `/articles/{slug}`, `/related/{slug}`, `/newspaper`, `/newspaper/{slug}`, `/books`, `/magazine`, `/videos`, `/support`, `/slugs`, `/search` |
+| Админское API, по токену | `/api/admin/v1/{news,articles,newspaper,books,magazine,videos}` — список, чтение, создание, правка, удаление; `/support` — кошельки и магазин; `/media` — загрузка файлов |
+| Проверка живости | `/q/health/ready` |
+
+Страницы списков считаются **с единицы**. Материал виден на сайте, когда у него `status = PUBLISHED` и наступила `publishedAt`. После изменений бэкенд сам сбрасывает кэш сайта (`POST {SITE_REVALIDATE_URL}`).
+
+Доступ к админскому API пока по токенам из `ADMIN_TOKENS` (`Authorization: Bearer …`). Вход по логину и паролю — этап A2 плана админки (`docs/admin-plan.md`).
+
+## Запуск для разработки
+
+```bash
+# База: любая PostgreSQL 15+, по умолчанию localhost:5432, база site, пользователь site, пароль site
+createdb site
+./gradlew quarkusDev                     # http://localhost:8080, админский токен — dev-token
+
+# Наполнить фикстурами сайта (из каталога frontend):
+API_BASE_URL=http://localhost:8080 ADMIN_TOKEN=dev-token yarn api:seed
+```
+
+## Переменные окружения
+
+| Переменная | Что | По умолчанию |
+|---|---|---|
+| `DB_USER`, `DB_PASSWORD` | доступ к базе | `site`; пароль в продакшне обязателен |
+| `DB_JDBC_URL`, `DB_REACTIVE_URL` | адрес базы (JDBC — для миграций) | `localhost:5432/site` |
+| `ADMIN_TOKENS` | токены админского API через запятую | пусто — API закрыто; в dev — `dev-token` |
+| `SITE_REVALIDATE_URL`, `REVALIDATE_SECRET` | сброс кэша сайта | пусто — не сбрасывать |
+| `MEDIA_DIR`, `MEDIA_URL` | куда класть загруженные файлы и откуда их раздаёт прокси | `./media`, `http://localhost:8080/media` |
+
+## Тесты
+
+```bash
+createdb site_test                       # тесты чистят её перед прогоном
+./gradlew test
+```
+
+Другая база — через `TEST_DB_JDBC_URL` и `TEST_DB_REACTIVE_URL`. В CI (`.github/workflows/ci.yml`) база поднимается сервисом.
+
+---
+
+## Справка Quarkus
 
 This project uses Quarkus, the Supersonic Subatomic Java Framework.
 
