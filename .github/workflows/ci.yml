@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, api-v1]
   pull_request:
 
 jobs:
@@ -25,10 +25,14 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      # gradlew в репозитории не хранится (.gitignore), поэтому Gradle ставим той же версии,
+      # что в gradle/wrapper/gradle-wrapper.properties
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.5.1"
       - name: Тесты
-        run: ./gradlew test
+        run: gradle test
       - name: Сборка
-        run: ./gradlew build -x test
+        run: gradle build -x test
       - name: Образ
         run: docker build -f src/main/docker/Dockerfile.jvm -t site-backend:${{ github.sha }} .

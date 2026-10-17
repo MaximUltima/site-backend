@@ -24,7 +24,12 @@ class Revalidator(
     @ConfigProperty(name = "site.revalidate-secret") private val secret: Optional<String>,
 ) {
     private val log = Logger.getLogger(Revalidator::class.java)
-    private val http: HttpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build()
+    // Только HTTP/1.1: по умолчанию клиент шлёт «Upgrade: h2c», а сервер Next.js
+    // на такой запрос молча закрывает соединение.
+    private val http: HttpClient = HttpClient.newBuilder()
+        .version(HttpClient.Version.HTTP_1_1)
+        .connectTimeout(Duration.ofSeconds(5))
+        .build()
 
     fun revalidate(tags: Collection<String>) {
         val target = url.orElse("").trim()

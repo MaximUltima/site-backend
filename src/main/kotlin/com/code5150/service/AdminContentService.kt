@@ -71,10 +71,12 @@ class AdminContentService(private val revalidator: Revalidator) {
             params += "%" + q.trim().lowercase().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
             conditions += "(lower(title) like ?${params.size} or lower(slug) like ?${params.size})"
         }
-        val query = if (conditions.isEmpty()) {
-            adapter.repository.findAll(adapter.sort)
-        } else {
-            adapter.repository.find(conditions.joinToString(" and "), adapter.sort, *params.toTypedArray())
+        val query = {
+            if (conditions.isEmpty()) {
+                adapter.repository.findAll(adapter.sort)
+            } else {
+                adapter.repository.find(conditions.joinToString(" and "), adapter.sort, *params.toTypedArray())
+            }
         }
         return paginate(query, page, size, PublicContentService.DEFAULT_FEED_SIZE, adapter.toForm)
     }
@@ -125,7 +127,7 @@ class AdminContentService(private val revalidator: Revalidator) {
     }
 
     private suspend fun <E : Content, F : ContentForm> find(adapter: ContentAdapter<E, F>, id: Long): E =
-        read { adapter.repository.findById(id) } ?: throw NotFoundException("Нет материала $id")
+        read { adapter.repository.findById(id).orNull() } ?: throw NotFoundException("Нет материала $id")
 
     /** Слаг из формы или из заголовка; занятый явный — ошибка, занятый сгенерированный — с номером. */
     private suspend fun <E : Content, F : ContentForm> resolveSlug(

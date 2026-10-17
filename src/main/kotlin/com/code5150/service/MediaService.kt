@@ -88,7 +88,7 @@ class MediaService(
     }
 
     suspend fun list(page: Int?, size: Int?): PageDto<MediaDto> =
-        paginate(repository.findAll(Sort.descending("id")), page, size, 50) { it.toDto() }
+        paginate({ repository.findAll(Sort.descending("id")) }, page, size, 50) { it.toDto() }
 
     suspend fun updateMeta(id: Long, meta: MediaMetaForm): MediaDto =
         Panache.withTransaction {
@@ -106,7 +106,7 @@ class MediaService(
      * хранят свою копию адреса — у них она просто перестанет открываться.
      */
     suspend fun delete(id: Long) {
-        val media = read { repository.findById(id) } ?: throw NotFoundException("Нет файла $id")
+        val media = read { repository.findById(id).orNull() } ?: throw NotFoundException("Нет файла $id")
         Panache.withTransaction { repository.deleteById(id) }.awaitSuspending()
         withContext(Dispatchers.IO) { Files.deleteIfExists(Path.of(dir).resolve(media.path)) }
     }

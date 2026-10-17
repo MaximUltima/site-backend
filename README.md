@@ -18,6 +18,8 @@
 
 ## Запуск для разработки
 
+Нужна JDK 21. `gradlew` в репозитории не хранится — создать один раз любым установленным Gradle: `gradle wrapper --gradle-version 9.5.1 --distribution-type all` (версия — как в `gradle/wrapper/gradle-wrapper.properties`, иначе файл перепишется).
+
 ```bash
 # База: любая PostgreSQL 15+, по умолчанию localhost:5432, база site, пользователь site, пароль site
 createdb site

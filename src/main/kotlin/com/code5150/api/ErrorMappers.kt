@@ -17,7 +17,14 @@ class ErrorMappers {
     private val log = Logger.getLogger(ErrorMappers::class.java)
 
     @ServerExceptionMapper
-    fun notFound(e: NotFoundException): Response = error(404, "not_found", e.message ?: "Не найдено")
+    fun notFound(e: NotFoundException): Response =
+        // По спецификации JAX-RS нечисловой ?page=abc превращается в 404 с причиной
+        // NumberFormatException. По контракту это неверный параметр — 400.
+        if (e.cause is IllegalArgumentException) {
+            error(400, "bad_request", "Неверный параметр запроса: ${e.cause?.message}")
+        } else {
+            error(404, "not_found", e.message ?: "Не найдено")
+        }
 
     @ServerExceptionMapper
     fun badRequest(e: BadRequestException): Response = error(400, "bad_request", e.message ?: "Неверный запрос")

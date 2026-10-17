@@ -58,24 +58,27 @@ class PublicContentService(
     )
 
     suspend fun newsList(page: Int?, size: Int?): PageDto<NewsSummaryDto> =
-        paginate(news.published(), page, size, DEFAULT_FEED_SIZE) { it.toSummary() }
+        paginate({ news.published() }, page, size, DEFAULT_FEED_SIZE) { it.toSummary() }
 
     suspend fun newsItem(slug: String): NewsItemDto? =
         read { news.findPublishedBySlug(slug) }?.toDto()
 
     suspend fun articleList(page: Int?, size: Int?, tag: String?): PageDto<ArticleSummaryDto> {
         if (tag.isNullOrBlank()) {
-            return paginate(articles.published(), page, size, DEFAULT_FEED_SIZE) { it.toSummary() }
+            return paginate({ articles.published() }, page, size, DEFAULT_FEED_SIZE) { it.toSummary() }
         }
         // Теги лежат JSON-строкой, поэтому фильтр — по подстроке с кавычками: "тег".
         val quoted = "%" + columnJsonString(tag) + "%"
-        val query = articles.find(
-            "status = ?1 and publishedAt <= ?2 and tags like ?3",
-            Sort.descending("publishedAt"),
-            com.code5150.entity.Status.PUBLISHED,
-            java.time.OffsetDateTime.now(),
-            quoted,
-        )
+        val now = java.time.OffsetDateTime.now()
+        val query = {
+            articles.find(
+                "status = ?1 and publishedAt <= ?2 and cast(tags as String) like ?3",
+                Sort.descending("publishedAt"),
+                com.code5150.entity.Status.PUBLISHED,
+                now,
+                quoted,
+            )
+        }
         return paginate(query, page, size, DEFAULT_FEED_SIZE) { it.toSummary() }
     }
 
@@ -83,7 +86,7 @@ class PublicContentService(
         read { articles.findPublishedBySlug(slug) }?.toDto()
 
     suspend fun search(q: String?, page: Int?, size: Int?): PageDto<ArticleSummaryDto> =
-        paginate(articles.searchPublished(q.orEmpty()), page, size, DEFAULT_FEED_SIZE) { it.toSummary() }
+        paginate({ articles.searchPublished(q.orEmpty()) }, page, size, DEFAULT_FEED_SIZE) { it.toSummary() }
 
     /**
      * «Читайте также»: свежие статьи и новости, кроме текущего материала.
@@ -111,7 +114,7 @@ class PublicContentService(
     }
 
     suspend fun newspaperList(page: Int?, size: Int?): PageDto<NewspaperIssueDto> =
-        paginate(newspaper.published(), page, size, DEFAULT_NEWSPAPER_SIZE) { it.toDto() }
+        paginate({ newspaper.published() }, page, size, DEFAULT_NEWSPAPER_SIZE) { it.toDto() }
 
     suspend fun newspaperIssue(slug: String): NewspaperIssueDto? =
         read { newspaper.findPublishedBySlug(slug) }?.toDto()
@@ -127,7 +130,7 @@ class PublicContentService(
 
     suspend fun support(): SupportDto = SupportDto(
         wallets = read { wallets.listAll(Sort.ascending("position").and("id")) }.map { it.toDto() },
-        shopUrl = read { settings.findById(Setting.SHOP_URL) }?.value?.takeIf { it.isNotBlank() },
+        shopUrl = read { settings.findById(Setting.SHOP_URL).orNull() }?.value?.takeIf { it.isNotBlank() },
     )
 
     suspend fun slugs(): SlugsDto = SlugsDto(
@@ -155,6 +158,12 @@ class PublicContentService(
 /** Запрос в отдельной сессии: публичные чтения не меняют данные. */
 internal suspend fun <T> read(block: () -> Uni<T>): T = Panache.withSession { block() }.awaitSuspending()
 
+/**
+ * В Kotlin-Panache `findById` объявлен как `Uni<Entity>` без `?`, хотя отдаёт null,
+ * и компилятор выкидывает проверку `?: throw`. Делаем тип честным.
+ */
+internal fun <T> Uni<T>.orNull(): Uni<T?> = map { it }
+
 /** Тег в том виде, как он лежит внутри JSON-массива: в кавычках и с экранированием. */
 private fun columnJsonString(value: String): String =
     com.code5150.entity.columnJson.writeValueAsString(value)
@@ -163,9 +172,10 @@ private fun columnJsonString(value: String): String =
 /**
  * Страница списка по контракту: page с единицы, size от 1 до 100,
  * за пределами списка — пустая страница, totalPages не меньше 1.
+ * Запрос передаётся функцией: Panache строит его только внутри открытой сессии.
  */
 internal suspend fun <E : Any, D> paginate(
-    query: PanacheQuery<E>,
+    buildQuery: () -> PanacheQuery<E>,
     page: Int?,
     size: Int?,
     defaultSize: Int,
@@ -178,6 +188,7 @@ internal suspend fun <E : Any, D> paginate(
         throw BadRequestException("size должен быть от 1 до ${PublicContentService.MAX_PAGE_SIZE}")
     }
     val (items, total) = Panache.withSession {
+        val query = buildQuery()
         query.page(Page.of(safePage - 1, safeSize)).list().flatMap { list ->
             query.count().map { total -> list to total }
         }

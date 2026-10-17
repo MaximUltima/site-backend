@@ -137,6 +137,15 @@ class ApiTest {
             .body("totalPages", equalTo(pages))
         given().get("/api/v1/news?page=0").then().statusCode(400)
         given().get("/api/v1/news?size=101").then().statusCode(400)
+        given().get("/api/v1/news?page=abc").then().statusCode(400).body("error", equalTo("bad_request"))
+    }
+
+    @Test
+    fun `нет материала по id в админке — 404`() {
+        given().header("Authorization", "Bearer test-token").get("/api/admin/v1/news/999999")
+            .then().statusCode(404).body("error", equalTo("not_found"))
+        given().header("Authorization", "Bearer test-token").delete("/api/admin/v1/media/999999")
+            .then().statusCode(404)
     }
 
     // Статьи и «Читайте также»
@@ -270,14 +279,15 @@ class ApiTest {
     // Медиатека
 
     @Test
-    fun `загрузка картинки: размеры считаются сами, адрес — от media url`() {
+    fun `загрузка картинки — размеры считаются сами, адрес от media url`() {
         val png = ByteArrayOutputStream().also {
             ImageIO.write(BufferedImage(40, 30, BufferedImage.TYPE_INT_RGB), "png", it)
         }.toByteArray()
 
         given().header("Authorization", "Bearer test-token")
             .multiPart("file", "cover.png", png, "image/png")
-            .multiPart("alt", "Обложка")
+            // RestAssured по умолчанию шлёт текстовые части в ISO-8859-1, браузер — в UTF-8
+            .multiPart("alt", "Обложка", "text/plain; charset=UTF-8")
             .post("/api/admin/v1/media")
             .then().statusCode(201)
             .body("width", equalTo(40))
