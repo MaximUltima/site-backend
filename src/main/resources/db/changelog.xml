@@ -7,5 +7,6 @@
 
     <include file="db/001_create_articles.sql"/>
     <include file="db/002_content_model.sql"/>
+    <include file="db/003_versioned_content.sql"/>
 
 </databaseChangeLog>

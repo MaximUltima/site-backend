@@ -1,198 +1,216 @@
 package com.code5150.service
 
-import com.code5150.dto.ArticleDto
-import com.code5150.dto.ArticleSummaryDto
-import com.code5150.dto.BookDto
-import com.code5150.dto.HomeDto
-import com.code5150.dto.MagazineIssueDto
-import com.code5150.dto.NewsItemDto
-import com.code5150.dto.NewsSummaryDto
-import com.code5150.dto.NewspaperIssueDto
-import com.code5150.dto.PageDto
-import com.code5150.dto.RelatedItemDto
-import com.code5150.dto.SlugsDto
-import com.code5150.dto.SupportDto
-import com.code5150.dto.VideoDto
-import com.code5150.dto.toDto
-import com.code5150.dto.toSummary
-import com.code5150.entity.Setting
-import com.code5150.repository.ArticleRepository
-import com.code5150.repository.BookRepository
-import com.code5150.repository.MagazineIssueRepository
-import com.code5150.repository.NewsRepository
-import com.code5150.repository.NewspaperIssueRepository
-import com.code5150.repository.SettingRepository
-import com.code5150.repository.VideoRepository
-import com.code5150.repository.WalletRepository
-import io.quarkus.hibernate.reactive.panache.kotlin.Panache
-import io.quarkus.hibernate.reactive.panache.kotlin.PanacheQuery
-import io.quarkus.panache.common.Page
-import io.quarkus.panache.common.Sort
-import io.smallrye.mutiny.Uni
-import io.smallrye.mutiny.coroutines.awaitSuspending
 import jakarta.enterprise.context.ApplicationScoped
-import jakarta.ws.rs.BadRequestException
+import org.eclipse.microprofile.config.inject.ConfigProperty
 import kotlin.math.ceil
 
-/**
- * Публичная часть: только опубликованное с наступившей датой.
- * Каждый метод — один эндпоинт из docs/api.md, раздел 3.
- */
 @ApplicationScoped
 class PublicContentService(
-    private val articles: ArticleRepository,
-    private val news: NewsRepository,
-    private val newspaper: NewspaperIssueRepository,
-    private val books: BookRepository,
-    private val magazine: MagazineIssueRepository,
-    private val videos: VideoRepository,
-    private val wallets: WalletRepository,
-    private val settings: SettingRepository,
+    private val store: VersionedContentStore,
+    private val downloads: DownloadService,
+    @ConfigProperty(name = "files.public-base") private val filesPublicBase: String,
 ) {
-
-    suspend fun home(): HomeDto = HomeDto(
-        news = read { news.published().range(0, 2).list() }.map { it.toSummary() },
-        articles = read { articles.published().range(0, 3).list() }.map { it.toSummary() },
-        issues = read { newspaper.published().range(0, 2).list() }.map { it.toDto() },
-        videos = read { videos.published().range(0, 1).list() }.map { it.toDto() },
+    suspend fun home(lang: String): Map<String, Any?> = mapOf(
+        "news" to store.list("news", lang).take(3).map { refs(lang, summary(it)) },
+        "articles" to store.list("articles", lang).take(4).map { refs(lang, summary(it)) },
+        "issues" to store.list("newspaper", lang).take(3).map { clean(it) },
+        "videos" to store.list("videos", lang).take(2).map { clean(it) },
     )
 
-    suspend fun newsList(page: Int?, size: Int?): PageDto<NewsSummaryDto> =
-        paginate({ news.published() }, page, size, DEFAULT_FEED_SIZE) { it.toSummary() }
-
-    suspend fun newsItem(slug: String): NewsItemDto? =
-        read { news.findPublishedBySlug(slug) }?.toDto()
-
-    suspend fun articleList(page: Int?, size: Int?, tag: String?): PageDto<ArticleSummaryDto> {
-        if (tag.isNullOrBlank()) {
-            return paginate({ articles.published() }, page, size, DEFAULT_FEED_SIZE) { it.toSummary() }
+    suspend fun list(kind: String, lang: String, page: Int?, size: Int?, tag: String? = null): Map<String, Any?> {
+        val p = (page ?: 1).coerceIn(1, 100_000)
+        val n = (size ?: if (kind == "newspaper") 10 else 20).coerceIn(1, 100)
+        val all = store.list(kind, lang, tag = tag)
+        val items = all.drop((p - 1) * n).take(n).map {
+            when (kind) {
+                "news", "articles" -> refs(lang, summary(it))
+                else -> clean(it)
+            }
         }
-        // Теги лежат JSON-строкой, поэтому фильтр — по подстроке с кавычками: "тег".
-        val quoted = "%" + columnJsonString(tag) + "%"
-        val now = java.time.OffsetDateTime.now()
-        val query = {
-            articles.find(
-                "status = ?1 and publishedAt <= ?2 and cast(tags as String) like ?3",
-                Sort.descending("publishedAt"),
-                com.code5150.entity.Status.PUBLISHED,
-                now,
-                quoted,
+        return mapOf(
+            "items" to items, "page" to p, "size" to n, "total" to all.size,
+            "totalPages" to maxOf(1, ceil(all.size.toDouble() / n).toInt()),
+        )
+    }
+
+    suspend fun full(kind: String, data: MutableMap<String, Any?>, lang: String): MutableMap<String, Any?> {
+        val actualLang = data["lang"]?.toString() ?: lang
+        val publication = store.publicationMeta(kind, data["slug"].toString(), actualLang)
+        val files = filesOut(data["files"])
+        val out = data.toMutableMap()
+        out.remove("files")
+        val cleaned = refs(lang, clean(out))
+        if (files.isNotEmpty()) cleaned["files"] = files
+        if (publication.count > 1) cleaned["updatedAt"] = publication.last
+        return cleaned
+    }
+
+    suspend fun one(kind: String, slug: String, lang: String): MutableMap<String, Any?>? =
+        store.one(kind, slug, lang)?.let { full(kind, it, lang) }
+
+    suspend fun simpleOne(kind: String, slug: String, lang: String): MutableMap<String, Any?>? =
+        store.one(kind, slug, lang)?.let { clean(it) }
+
+    suspend fun categories(lang: String): List<MutableMap<String, Any?>> = store.live("categories", lang)
+        .sortedBy { (it["position"] as? Number)?.toInt() ?: 0 }.map { clean(it) }
+
+    suspend fun books(lang: String): List<MutableMap<String, Any?>> = store.live("books", lang)
+        .sortedBy { (it["position"] as? Number)?.toInt() ?: 0 }.map { clean(it) }
+
+    suspend fun array(kind: String, lang: String): List<MutableMap<String, Any?>> = store.list(kind, lang).map { clean(it) }
+
+    suspend fun support(lang: String): MutableMap<String, Any?> =
+        store.one("support", "support", lang)?.let { clean(it) } ?: mutableMapOf("wallets" to emptyList<Any>())
+
+    suspend fun taxon(kind: String, slug: String, lang: String, page: Int?, size: Int?): MutableMap<String, Any?>? {
+        val own = simpleOne(kind, slug, lang) ?: return null
+        val key = if (kind == "categories") "category" else "author"
+        val p = (page ?: 1).coerceIn(1, 100_000)
+        val n = (size ?: 20).coerceIn(1, 100)
+        val articles = store.list("articles", lang, category = slug.takeIf { key == "category" }, author = slug.takeIf { key == "author" })
+        own["items"] = articles.drop((p - 1) * n).take(n).map { refs(lang, summary(it)) }
+        own["page"] = p
+        own["size"] = n
+        own["total"] = articles.size
+        own["totalPages"] = maxOf(1, ceil(articles.size.toDouble() / n).toInt())
+        own["news"] = store.list("news", lang, category = slug.takeIf { key == "category" }, author = slug.takeIf { key == "author" })
+            .take(10).map { refs(lang, summary(it)) }
+        return own
+    }
+
+    suspend fun related(slug: String, lang: String, kind: String?, limit: Int?): List<Map<String, Any?>> {
+        val kinds = if (kind == "article" || kind == "news") listOf(kind) else listOf("article", "news")
+        val self = kinds.firstNotNullOfOrNull { k ->
+            store.one(relatedKind(k), slug, lang)?.takeIf { it["fallback"] != true }?.let { it to k }
+        } ?: return emptyList()
+        val candidates = listOf("article", "news").flatMap { k ->
+            store.list(relatedKind(k), lang).filter { it["fallback"] != true && !(k == self.second && it["slug"] == slug) }
+                .map { it to k }
+        }
+        return candidates.map { candidate ->
+            val score = 3 * common(candidate.first["categories"], self.first["categories"]) +
+                2 * common(candidate.first["authors"], self.first["authors"]) + common(candidate.first["tags"], self.first["tags"])
+            Triple(candidate, score, candidate.first["publishedAt"]?.toString().orEmpty())
+        }.sortedWith(compareByDescending<Triple<Pair<MutableMap<String, Any?>, String>, Int, String>> { it.second }.thenByDescending { it.third })
+            .take((limit ?: 3).coerceIn(1, 10)).map { brief(it.first.first, it.first.second) }
+    }
+
+    suspend fun next(slug: String, lang: String, kind: String?): Map<String, Any?>? {
+        val kinds = if (kind == "article" || kind == "news") listOf(kind) else listOf("article", "news")
+        val self = kinds.firstNotNullOfOrNull { k ->
+            store.one(relatedKind(k), slug, lang)?.takeIf { it["fallback"] != true }?.let { it to k }
+        } ?: return null
+        val list = store.list(relatedKind(self.second), lang)
+            .filter { it["fallback"] != true && it["slug"] != slug }
+            .sortedByDescending { it["publishedAt"]?.toString().orEmpty() }
+        val selfDate = self.first["publishedAt"]?.toString().orEmpty()
+        val next = list.firstOrNull { it["publishedAt"]?.toString().orEmpty() < selfDate } ?: list.firstOrNull()
+        return next?.let { brief(it, self.second) }
+    }
+
+    suspend fun search(q: String?, lang: String, kind: String?, limit: Int?, offset: Int?): Map<String, Any?> {
+        val lim = (limit ?: 10).coerceIn(1, 20)
+        val off = (offset ?: 0).coerceIn(0, 1000)
+        val words = q.orEmpty().take(100).lowercase().replace('ё', 'е')
+            .split(Regex("[^\\p{L}\\p{N}]+")).filter { it.isNotBlank() }.distinct().take(8)
+        if (words.isEmpty()) return mapOf("items" to emptyList<Any>(), "total" to 0, "limit" to lim, "offset" to off)
+        val kinds = if (kind in listOf("articles", "news")) listOf(kind!!) else listOf("articles", "news")
+        val found = kinds.flatMap { k ->
+            store.list(k, lang).filter { data ->
+                val haystack = listOf(data["title"], data["announce"], data["body"], data["tags"])
+                    .joinToString(" ").lowercase().replace('ё', 'е')
+                words.all { haystack.contains(it) }
+            }.map { it to k }
+        }.sortedByDescending { it.first["publishedAt"]?.toString().orEmpty() }
+        val items = found.drop(off).take(lim).map { (data, k) ->
+            linkedMapOf<String, Any?>(
+                "slug" to data["slug"], "kind" to if (k == "news") "news" else "article",
+                "title" to data["title"], "announce" to data["announce"], "cover" to data["cover"],
+                "publishedAt" to data["publishedAt"], "fallback" to (data["fallback"] == true),
+                "fragment" to fragment(data["body"]?.toString() ?: data["announce"]?.toString().orEmpty(), words),
             )
         }
-        return paginate(query, page, size, DEFAULT_FEED_SIZE) { it.toSummary() }
+        return mapOf("items" to items, "total" to found.size, "limit" to lim, "offset" to off)
     }
 
-    suspend fun article(slug: String): ArticleDto? =
-        read { articles.findPublishedBySlug(slug) }?.toDto()
-
-    suspend fun search(q: String?, page: Int?, size: Int?): PageDto<ArticleSummaryDto> =
-        paginate({ articles.searchPublished(q.orEmpty()) }, page, size, DEFAULT_FEED_SIZE) { it.toSummary() }
-
-    /**
-     * «Читайте также»: свежие статьи и новости, кроме текущего материала.
-     * Если у текущей статьи есть теги, вперёд идут материалы с общими тегами.
-     */
-    suspend fun related(slug: String, limit: Int?): List<RelatedItemDto> {
-        val count = (limit ?: 3).also { if (it !in 1..10) throw BadRequestException("limit должен быть от 1 до 10") }
-        val source = read { articles.findPublishedBySlug(slug) }
-        val sourceTags = source?.tags.orEmpty().toSet()
-
-        val candidates = read { articles.published().range(0, POOL - 1).list() }
-            .filter { it.slug != slug }
-            .map { Candidate(RelatedItemDto("article", it.slug, it.title, it.announce), it.publishedAt, it.tags.orEmpty()) } +
-            read { news.published().range(0, POOL - 1).list() }
-                .filter { it.slug != slug }
-                .map { Candidate(RelatedItemDto("news", it.slug, it.title, it.announce), it.publishedAt, emptyList()) }
-
-        return candidates
-            .sortedWith(
-                compareByDescending<Candidate> { c -> c.tags.count { it in sourceTags } }
-                    .thenByDescending { it.publishedAt },
-            )
-            .take(count)
-            .map { it.item }
-    }
-
-    suspend fun newspaperList(page: Int?, size: Int?): PageDto<NewspaperIssueDto> =
-        paginate({ newspaper.published() }, page, size, DEFAULT_NEWSPAPER_SIZE) { it.toDto() }
-
-    suspend fun newspaperIssue(slug: String): NewspaperIssueDto? =
-        read { newspaper.findPublishedBySlug(slug) }?.toDto()
-
-    suspend fun bookList(): List<BookDto> =
-        read { books.published(Sort.ascending("position").and("id")).list() }.map { it.toDto() }
-
-    suspend fun magazineList(): List<MagazineIssueDto> =
-        read { magazine.published().list() }.map { it.toDto() }
-
-    suspend fun videoList(): List<VideoDto> =
-        read { videos.published().list() }.map { it.toDto() }
-
-    suspend fun support(): SupportDto = SupportDto(
-        wallets = read { wallets.listAll(Sort.ascending("position").and("id")) }.map { it.toDto() },
-        shopUrl = read { settings.findById(Setting.SHOP_URL).orNull() }?.value?.takeIf { it.isNotBlank() },
-    )
-
-    suspend fun slugs(): SlugsDto = SlugsDto(
-        news = read { news.publishedSlugs() },
-        articles = read { articles.publishedSlugs() },
-        newspaper = read { newspaper.publishedSlugs() },
-    )
-
-    private data class Candidate(
-        val item: RelatedItemDto,
-        val publishedAt: java.time.OffsetDateTime,
-        val tags: List<String>,
-    )
-
-    companion object {
-        const val DEFAULT_FEED_SIZE = 20
-        const val DEFAULT_NEWSPAPER_SIZE = 10
-        const val MAX_PAGE_SIZE = 100
-
-        /** Сколько свежих материалов каждого вида перебирать для «Читайте также». */
-        private const val POOL = 30
-    }
-}
-
-/** Запрос в отдельной сессии: публичные чтения не меняют данные. */
-internal suspend fun <T> read(block: () -> Uni<T>): T = Panache.withSession { block() }.awaitSuspending()
-
-/**
- * В Kotlin-Panache `findById` объявлен как `Uni<Entity>` без `?`, хотя отдаёт null,
- * и компилятор выкидывает проверку `?: throw`. Делаем тип честным.
- */
-internal fun <T> Uni<T>.orNull(): Uni<T?> = map { it }
-
-/** Тег в том виде, как он лежит внутри JSON-массива: в кавычках и с экранированием. */
-private fun columnJsonString(value: String): String =
-    com.code5150.entity.columnJson.writeValueAsString(value)
-        .replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-/**
- * Страница списка по контракту: page с единицы, size от 1 до 100,
- * за пределами списка — пустая страница, totalPages не меньше 1.
- * Запрос передаётся функцией: Panache строит его только внутри открытой сессии.
- */
-internal suspend fun <E : Any, D> paginate(
-    buildQuery: () -> PanacheQuery<E>,
-    page: Int?,
-    size: Int?,
-    defaultSize: Int,
-    map: (E) -> D,
-): PageDto<D> {
-    val safePage = page ?: 1
-    val safeSize = size ?: defaultSize
-    if (safePage < 1) throw BadRequestException("page считается с единицы")
-    if (safeSize !in 1..PublicContentService.MAX_PAGE_SIZE) {
-        throw BadRequestException("size должен быть от 1 до ${PublicContentService.MAX_PAGE_SIZE}")
-    }
-    val (items, total) = Panache.withSession {
-        val query = buildQuery()
-        query.page(Page.of(safePage - 1, safeSize)).list().flatMap { list ->
-            query.count().map { total -> list to total }
+    suspend fun slugs(lang: String): Map<String, Any?> {
+        val live = VersionedContentStore.KINDS.associateWith { store.live(it, lang) }
+        val modified = listOf("news", "articles").associateWith { kind ->
+            live.getValue(kind).mapNotNull { data ->
+                val slug = data["slug"]?.toString() ?: return@mapNotNull null
+                val actualLang = data["lang"]?.toString() ?: lang
+                val publication = store.publicationMeta(kind, slug, actualLang)
+                val date = if (publication.count > 1) publication.last else data["publishedAt"]?.toString()
+                date?.let { slug to it }
+            }.toMap()
         }
-    }.awaitSuspending()
-    val totalPages = maxOf(1, ceil(total.toDouble() / safeSize).toInt())
-    return PageDto(items.map(map), safePage, safeSize, total, totalPages)
+        val untranslated = listOf("news", "articles").associateWith { kind ->
+            live.getValue(kind).filter { it["fallback"] == true }.map { it["slug"] }
+        }
+        return mapOf(
+            "news" to live.getValue("news").map { it["slug"] },
+            "articles" to live.getValue("articles").map { it["slug"] },
+            "categories" to live.getValue("categories").map { it["slug"] },
+            "authors" to live.getValue("authors").map { it["slug"] },
+            "newspaper" to live.getValue("newspaper").map { it["slug"] },
+            "modified" to modified, "untranslated" to untranslated,
+        )
+    }
+
+    private suspend fun refs(lang: String, data: MutableMap<String, Any?>): MutableMap<String, Any?> {
+        val categories = store.live("categories", lang).associate { it["slug"] to mapOf("slug" to it["slug"], "title" to it["title"]) }
+        val authors = store.live("authors", lang).associate { it["slug"] to mapOf("slug" to it["slug"], "name" to it["name"]) }
+        data["categories"] = stringList(data["categories"]).mapNotNull { categories[it] }
+        data["authors"] = stringList(data["authors"]).mapNotNull { authors[it] }
+        return data
+    }
+
+    private suspend fun filesOut(value: Any?): List<Map<String, Any?>> {
+        val list = value as? List<*> ?: return emptyList()
+        return list.mapNotNull { entry ->
+            val ref = entry as? Map<*, *> ?: return@mapNotNull null
+            val id = (ref["id"] as? Number)?.toLong() ?: ref["id"]?.toString()?.toLongOrNull() ?: return@mapNotNull null
+            val file = downloads.file(id) ?: return@mapNotNull null
+            if (file.status != "active" || file.license == null || file.source == null) return@mapNotNull null
+            mapOf(
+                "title" to (ref["title"]?.toString()?.takeIf { it.isNotEmpty() } ?: file.name),
+                "name" to "${file.name}.${file.ext}", "type" to (DownloadService.TYPES[file.ext]?.second ?: file.ext),
+                "size" to file.size, "sha256" to file.sha256,
+                "license" to (DownloadService.LICENSES[file.license] ?: file.license), "source" to file.source,
+                "url" to "${filesPublicBase.trimEnd('/')}/${file.id}/${file.name}.${file.ext}",
+            )
+        }
+    }
+
+    private fun summary(source: Map<String, Any?>): MutableMap<String, Any?> = source.toMutableMap().also {
+        it.remove("body"); it.remove("status"); it.remove("position"); it.remove("files")
+    }
+
+    private fun clean(source: Map<String, Any?>): MutableMap<String, Any?> = source.toMutableMap().also {
+        it.remove("status"); it.remove("position")
+    }
+
+    private fun common(a: Any?, b: Any?): Int = stringList(a).toSet().intersect(stringList(b).toSet()).size
+    private fun relatedKind(kind: String) = if (kind == "article") "articles" else "news"
+    private fun brief(data: Map<String, Any?>, kind: String) = mapOf(
+        "kind" to kind, "slug" to data["slug"], "title" to data["title"],
+        "announce" to data["announce"], "publishedAt" to data["publishedAt"],
+    )
+
+    private fun fragment(body: String, words: List<String>): List<Map<String, Any>> {
+        val plain = body.replace(Regex("<[^>]*>"), " ")
+            .map { if (it in "`*_#>~|\\[]{}") ' ' else it }.joinToString("")
+            .replace(Regex("\\s+"), " ").trim()
+        val index = words.map { plain.lowercase().indexOf(it) }.filter { it >= 0 }.minOrNull() ?: 0
+        val start = (index - 60).coerceAtLeast(0)
+        val text = plain.drop(start).take(180)
+        val firstHit = words.map { text.lowercase().indexOf(it) }.filter { it >= 0 }.minOrNull()
+        if (firstHit == null) return listOf(mapOf("text" to text, "hit" to false))
+        val word = words.first { text.lowercase().indexOf(it) == firstHit }
+        return listOfNotNull(
+            text.take(firstHit).takeIf { it.isNotEmpty() }?.let { mapOf("text" to it, "hit" to false) },
+            mapOf("text" to text.substring(firstHit, firstHit + word.length), "hit" to true),
+            text.drop(firstHit + word.length).takeIf { it.isNotEmpty() }?.let { mapOf("text" to it, "hit" to false) },
+        )
+    }
 }

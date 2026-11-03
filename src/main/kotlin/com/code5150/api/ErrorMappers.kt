@@ -27,11 +27,14 @@ class ErrorMappers {
         }
 
     @ServerExceptionMapper
+    fun contract(e: ContractException): Response = error(e.statusCode, e.code, e.message ?: e.code)
+
+    @ServerExceptionMapper
     fun badRequest(e: BadRequestException): Response = error(400, "bad_request", e.message ?: "Неверный запрос")
 
     @ServerExceptionMapper
     fun badJson(e: com.fasterxml.jackson.core.JsonProcessingException): Response =
-        error(400, "bad_request", "Неверный JSON: ${e.originalMessage}")
+        error(400, "error", "Неверный JSON: ${e.originalMessage}")
 
     @ServerExceptionMapper
     fun conflict(e: ConflictException): Response = error(409, "conflict", e.message ?: "Конфликт")

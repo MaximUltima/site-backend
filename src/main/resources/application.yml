@@ -22,7 +22,7 @@ quarkus:
   http:
     # Загрузка картинок в медиатеку
     limits:
-      max-body-size: 25M
+      max-body-size: 55M
   jackson:
     # Даты — строками ISO 8601, а не числами
     write-dates-as-timestamps: false
@@ -44,6 +44,9 @@ media:
   # Каталог, куда складываются загруженные файлы, и адрес, по которому их раздаёт прокси.
   dir: ${MEDIA_DIR:./media}
   url: ${MEDIA_URL:http://localhost:8080/media}
+files:
+  dir: ${FILES_DIR:./files}
+  public-base: ${FILES_PUBLIC_BASE:http://localhost:8080/files}
 
 "%dev":
   quarkus:
@@ -65,6 +68,11 @@ media:
       clean-at-start: true
   admin:
     tokens: test-token
+  site:
+    revalidate-secret: preview-secret
   media:
     dir: build/test-media
     url: https://media.test
+  files:
+    dir: build/test-files
+    public-base: https://files.test

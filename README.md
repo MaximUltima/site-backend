@@ -8,11 +8,12 @@
 
 | Часть | Пути |
 |---|---|
-| Публичное API, только опубликованное | `GET /api/v1/home`, `/news`, `/news/{slug}`, `/articles`, `/articles/{slug}`, `/related/{slug}`, `/newspaper`, `/newspaper/{slug}`, `/books`, `/magazine`, `/videos`, `/support`, `/slugs`, `/search` |
-| Админское API, по токену | `/api/admin/v1/{news,articles,newspaper,books,magazine,videos}` — список, чтение, создание, правка, удаление; `/support` — кошельки и магазин; `/media` — загрузка файлов |
-| Проверка живости | `/q/health/ready` |
+| Публичное API, только текущие опубликованные версии | `GET /api/v1/home`, ленты и материалы, `/categories`, `/authors`, `/related/{slug}`, `/next/{slug}`, `/slugs`, `/search`, `/support`, `/preview`; `POST /api/v1/view` |
+| Админское API, по токену | `POST /api/admin/v1/{kind}`, версии, история, публикация/откат, docs/live/one, review, расписание, журнал, image/file и агрегаты `/stats/*` |
+| Файлы | `GET /media/{name}`, `GET /files/{id}/{name}` (HEAD и Range) |
+| Проверка живости | `/health`, `/q/health/ready` |
 
-Страницы списков считаются **с единицы**. Материал виден на сайте, когда у него `status = PUBLISHED` и наступила `publishedAt`. После изменений бэкенд сам сбрасывает кэш сайта (`POST {SITE_REVALIDATE_URL}`).
+Единый источник контента — append-only таблица `content_versions` с JSON исходной формы, lowercase-статусами и хэш-цепочкой. Старые normalized-таблицы не используются API. Страницы списков считаются **с единицы**. Публикация и откат создают новые версии; после изменений бэкенд сам сбрасывает кэш сайта (`POST {SITE_REVALIDATE_URL}`).
 
 Доступ к админскому API пока по токенам из `ADMIN_TOKENS` (`Authorization: Bearer …`). Вход по логину и паролю — этап A2 плана админки (`docs/admin-plan.md`).
 
@@ -37,7 +38,8 @@ API_BASE_URL=http://localhost:8080 ADMIN_TOKEN=dev-token yarn api:seed
 | `DB_JDBC_URL`, `DB_REACTIVE_URL` | адрес базы (JDBC — для миграций) | `localhost:5432/site` |
 | `ADMIN_TOKENS` | токены админского API через запятую | пусто — API закрыто; в dev — `dev-token` |
 | `SITE_REVALIDATE_URL`, `REVALIDATE_SECRET` | сброс кэша сайта | пусто — не сбрасывать |
-| `MEDIA_DIR`, `MEDIA_URL` | куда класть загруженные файлы и откуда их раздаёт прокси | `./media`, `http://localhost:8080/media` |
+| `MEDIA_DIR`, `MEDIA_URL` | картинки и их публичный адрес | `./media`, `http://localhost:8080/media` |
+| `FILES_DIR`, `FILES_PUBLIC_BASE` | файлы для скачивания и их публичный адрес | `./files`, `http://localhost:8080/files` |
 
 ## Тесты
 
