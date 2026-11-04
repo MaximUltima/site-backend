@@ -28,6 +28,11 @@ quarkus:
     write-dates-as-timestamps: false
     # status можно присылать и как "published", и как "PUBLISHED"
     accept-case-insensitive-enums: true
+  native:
+    reflection:
+      include-globs: com.code5150.dto.**,io.quarkus.smallrye.openapi.runtime.**,io.smallrye.openapi.**
+  swagger-ui:
+    always-include: true
 
 # Адреса, секреты и пути сайта (docs/api.md, разделы 4–5)
 site:
