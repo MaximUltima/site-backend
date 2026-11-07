@@ -130,6 +130,21 @@ class ApiTest {
     }
 
     @Test
+    fun `правка и публикация импортированного материала с source создают версии`() {
+        val slug = slug("source-edit")
+        val base = mapOf(
+            "slug" to slug, "title" to "Импорт", "source" to "telegram:militant/1000",
+            "announce" to "Анонс", "body" to "Текст для чтения",
+        )
+        admin().body(base + ("status" to "DRAFT")).post("/api/admin/v1/news").then().statusCode(201)
+        admin().body(base + ("status" to "DRAFT") + ("title" to "Поправлено"))
+            .post("/api/admin/v1/news").then().statusCode(201).body("data.title", equalTo("Поправлено"))
+        admin().body(base + ("status" to "PUBLISHED") + ("title" to "Поправлено"))
+            .post("/api/admin/v1/news").then().statusCode(201).body("status", equalTo("published"))
+        given().get("/api/v1/news/$slug").then().statusCode(200).body("title", equalTo("Поправлено"))
+    }
+
+    @Test
     fun `schedule публикует due один раз и unschedule отменяет`() {
         val slug = slug("schedule")
         save(slug = slug, status = "DRAFT")
@@ -183,7 +198,7 @@ class ApiTest {
     }
 
     @Test
-    fun `ручная подборка related задаёт порядок, limit и пропуск недоступного`() {
+    fun `ручная подборка related задаёт порядок, пропускает недоступное и не режется limit`() {
         val older = slug("rel-older")
         val newer = slug("rel-newer")
         val middle = slug("rel-middle")
@@ -208,19 +223,27 @@ class ApiTest {
                     mapOf("kind" to "news", "slug" to newer),
                     mapOf("kind" to "articles", "slug" to middle),
                     mapOf("kind" to "articles", "slug" to source),
+                    mapOf("url" to "https://t.me/militant_SWP/9990", "title" to "Внешняя первая"),
+                    mapOf("url" to "https://t.me/militant_SWP/9986", "title" to "Внешняя вторая"),
                 ),
             ),
         )
 
-        // Порядок ручной (не по дате), недоступное пропущено, limit обрезает уже после фильтра.
+        // Порядок ручной (не по дате), недоступное пропущено. Ручную подборку limit не обрезает:
+        // редактор задал её сам, на сайте показываем всё (до десяти пунктов).
         given().get("/api/v1/related/$source?kind=article&limit=2").then().statusCode(200)
-            .body("size()", equalTo(2))
+            .body("size()", equalTo(5))
             .body("[0].slug", equalTo(older)).body("[0].kind", equalTo("article"))
             .body("[1].slug", equalTo(newer)).body("[1].kind", equalTo("news"))
+            .body("[2].slug", equalTo(middle))
+            .body("[3].kind", equalTo("link")).body("[3].url", equalTo("https://t.me/militant_SWP/9990"))
+            .body("[4].kind", equalTo("link")).body("[4].title", equalTo("Внешняя вторая"))
+        // И без kind тоже.
+        given().get("/api/v1/related/$source").then().statusCode(200).body("size()", equalTo(5))
         // Внутреннее поле не утекает в публичную статью.
         given().get("/api/v1/articles/$source").then().statusCode(200).body("related", nullValue())
         admin().get("/api/admin/v1/one/articles/$source").then().statusCode(200)
-            .body("data.related.size()", equalTo(7))
+            .body("data.related.size()", equalTo(9))
     }
 
     @Test

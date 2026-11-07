@@ -4,6 +4,7 @@ import com.code5150.api.ContractException
 import com.code5150.service.DownloadService
 import com.code5150.service.Revalidator
 import com.code5150.service.VersionedContentStore
+import com.code5150.service.VersionRow
 import com.code5150.service.contentJson
 import com.code5150.service.isoAt
 import com.code5150.service.isoNow
@@ -66,7 +67,11 @@ class AdminContentResource(
         checkFields(body)
         if (source is String) {
             val seen = store.findBySource(kind, slug, lang, source)
-            if (seen != null) return Response.ok(seen.toMap().also { it["idempotent"] = true }).build()
+            // Идемпотентны только повторные отправки того же материала с тем же статусом:
+            // правка черновика или его публикация обязаны создавать новую версию,
+            // даже если source (у импортированных материалов) переносится из версии в версию.
+            if (seen != null && seen.status == status && sameSubmission(seen, body))
+                return Response.ok(seen.toMap().also { it["idempotent"] = true }).build()
         }
         body["publishedAt"] = publishedAt(body)
         if (body.containsKey("review")) body["review"] = body["review"] == true || body["review"] == "true"
@@ -316,6 +321,16 @@ class AdminContentResource(
         val tags = mutableListOf(kind, "$kind:$slug")
         if (kind in setOf("news", "articles", "newspaper", "videos")) tags += "home"
         revalidator.revalidate(tags)
+    }
+
+    /**
+     * Совпадает ли присланное с данными последней версии с тем же source.
+     * Сравниваем только ключи запроса: сервис сам добавляет publishedAt, нормализует
+     * review и т.п. — всё это на статус «повторной отправки» не влияет.
+     */
+    private fun sameSubmission(seen: VersionRow, body: Map<String, Any?>): Boolean {
+        val stored = seen.data
+        return body.all { (key, value) -> stored[key] == value }
     }
 
     private fun actor(value: String?): String = value?.takeIf { ACTOR_RE.matches(it) } ?: "api"

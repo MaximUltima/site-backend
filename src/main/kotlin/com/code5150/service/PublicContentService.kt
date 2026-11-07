@@ -85,7 +85,7 @@ class PublicContentService(
         } ?: return emptyList()
         // Непустое ручное поле related задаёт подборку целиком (автоподборки нет).
         val manual = manualItems(self.first["related"])
-        if (manual != null) return manualRelated(manual, self.second, slug, lang, limit)
+        if (manual != null) return manualRelated(manual, self.second, slug, lang)
         val candidates = listOf("article", "news").flatMap { k ->
             store.list(relatedKind(k), lang).filter { it["fallback"] != true && !(k == self.second && it["slug"] == slug) }
                 .map { it to k }
@@ -234,18 +234,22 @@ class PublicContentService(
         return out
     }
 
-    /** Ручная подборка: порядок списка, недоступное и self пропускаются, потом уже limit. */
+    private val MAX_MANUAL_RELATED = 10
+
+    /**
+     * Ручная подборка: порядок списка, недоступное и self пропускаются. Отдаём всё,
+     * что задал редактор (в админке допускается до десяти пунктов): `limit`
+     * относится только к автоподборке, ручную подборку он не обрезает.
+     */
     private suspend fun manualRelated(
         items: List<Map<String, Any?>>,
         selfKind: String,
         selfSlug: String,
         lang: String,
-        limit: Int?,
     ): List<Map<String, Any?>> {
-        val n = (limit ?: 3).coerceIn(1, 10)
         val out = ArrayList<Map<String, Any?>>()
         for (item in items) {
-            if (out.size >= n) break
+            if (out.size >= MAX_MANUAL_RELATED) break
             val url = item["url"]?.toString()
             if (url != null) {
                 out.add(mapOf("kind" to "link", "url" to url, "title" to item["title"], "announce" to item["announce"]))
