@@ -3,6 +3,7 @@ package com.code5150.dto
 import com.code5150.entity.IssueEntry
 import com.code5150.entity.MediaRef
 import com.code5150.entity.Spec
+import io.quarkus.runtime.annotations.RegisterForReflection
 import java.time.OffsetDateTime
 
 /*
@@ -107,5 +108,9 @@ data class HomeDto(
     val videos: List<VideoDto>,
 )
 
-/** Тело ошибки: { error, message }. */
+/** Тело ошибки: { error, message }.
+ *  Регистрируем для отражения: в нативном образе этот DTO возвращается из
+ *  мапперов ошибок через Response, в сигнатурах REST он не виден — без
+ *  регистрации сериализация падает и любой ответ с ошибкой превращается в 500. */
+@RegisterForReflection
 data class ErrorDto(val error: String, val message: String)

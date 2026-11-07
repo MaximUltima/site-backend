@@ -12,7 +12,13 @@ USER quarkus
 WORKDIR /code
 COPY src /code/src
 # -Dquarkus.package.type=native - включить, если с текущими 2 флагами сборка падает
-RUN ./gradlew quarkusBuild --stacktrace -Dquarkus.native.enabled=true -Dquarkus.package.jar.enabled=false
+# native-image-xmx и --no-daemon — чтобы сборка укладывалась в память Docker на
+# машине разработчика (по умолчанию native-image просит 75% RAM контейнера и падает по OOM)
+RUN ./gradlew quarkusBuild --stacktrace --no-daemon \
+    -Dorg.gradle.jvmargs=-Xmx1g \
+    -Dquarkus.native.enabled=true \
+    -Dquarkus.package.jar.enabled=false \
+    -Dquarkus.native.native-image-xmx=5g
 
 ## Stage 2 : create the docker final image
 FROM quay.io/quarkus/ubi9-quarkus-micro-image:2.0
