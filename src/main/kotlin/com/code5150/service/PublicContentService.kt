@@ -83,6 +83,9 @@ class PublicContentService(
         val self = kinds.firstNotNullOfOrNull { k ->
             store.one(relatedKind(k), slug, lang)?.takeIf { it["fallback"] != true }?.let { it to k }
         } ?: return emptyList()
+        // Непустое ручное поле related задаёт подборку целиком (автоподборки нет).
+        val manual = manualItems(self.first["related"])
+        if (manual != null) return manualRelated(manual, self.second, slug, lang, limit)
         val candidates = listOf("article", "news").flatMap { k ->
             store.list(relatedKind(k), lang).filter { it["fallback"] != true && !(k == self.second && it["slug"] == slug) }
                 .map { it to k }
@@ -184,10 +187,13 @@ class PublicContentService(
 
     private fun summary(source: Map<String, Any?>): MutableMap<String, Any?> = source.toMutableMap().also {
         it.remove("body"); it.remove("status"); it.remove("position"); it.remove("files")
+        // related — внутреннее поле: подборку сайт получает только через /related.
+        it.remove("related")
     }
 
     private fun clean(source: Map<String, Any?>): MutableMap<String, Any?> = source.toMutableMap().also {
         it.remove("status"); it.remove("position")
+        it.remove("related")
     }
 
     private fun common(a: Any?, b: Any?): Int = stringList(a).toSet().intersect(stringList(b).toSet()).size
@@ -196,6 +202,64 @@ class PublicContentService(
         "kind" to kind, "slug" to data["slug"], "title" to data["title"],
         "announce" to data["announce"], "publishedAt" to data["publishedAt"],
     )
+
+    private val RELATED_SLUG_RE = Regex("^[a-z0-9][a-z0-9-]{0,119}$")
+    private val EXTERNAL_URL_RE = Regex("^https://[^\\s\"'<>`]+$", RegexOption.IGNORE_CASE)
+
+    /**
+     * Ручное поле related: ссылки на материалы {kind: articles|news, slug}
+     * или внешние {url: https://…, title, announce?}. null — поля нет или оно пустое (автоподборка).
+     */
+    private fun manualItems(raw: Any?): List<Map<String, Any?>>? {
+        val list = raw as? List<*> ?: return null
+        if (list.isEmpty()) return null
+        val out = ArrayList<Map<String, Any?>>()
+        val seen = HashSet<String>()
+        for (item in list) {
+            val map = item as? Map<*, *> ?: continue
+            val url = map["url"]?.toString()
+            if (url != null) {
+                if (!EXTERNAL_URL_RE.matches(url)) continue
+                val title = map["title"]?.toString()?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+                val announce = map["announce"]?.toString()?.take(1000) ?: ""
+                if (seen.add("url:$url")) out.add(mapOf("url" to url.take(500), "title" to title.take(300), "announce" to announce))
+                continue
+            }
+            val kind = map["kind"]?.toString() ?: continue
+            val slug = map["slug"]?.toString() ?: continue
+            if (kind != "articles" && kind != "news") continue
+            if (!RELATED_SLUG_RE.matches(slug)) continue
+            if (seen.add("$kind/$slug")) out.add(mapOf("kind" to kind, "slug" to slug))
+        }
+        return out
+    }
+
+    /** Ручная подборка: порядок списка, недоступное и self пропускаются, потом уже limit. */
+    private suspend fun manualRelated(
+        items: List<Map<String, Any?>>,
+        selfKind: String,
+        selfSlug: String,
+        lang: String,
+        limit: Int?,
+    ): List<Map<String, Any?>> {
+        val n = (limit ?: 3).coerceIn(1, 10)
+        val out = ArrayList<Map<String, Any?>>()
+        for (item in items) {
+            if (out.size >= n) break
+            val url = item["url"]?.toString()
+            if (url != null) {
+                out.add(mapOf("kind" to "link", "url" to url, "title" to item["title"], "announce" to item["announce"]))
+                continue
+            }
+            val kind = item["kind"]?.toString() ?: continue
+            val slug = item["slug"]?.toString() ?: continue
+            if (relatedKind(selfKind) == kind && slug == selfSlug) continue
+            val data = store.one(kind, slug, lang) ?: continue
+            if (data["fallback"] == true) continue
+            out.add(brief(data, if (kind == "articles") "article" else "news"))
+        }
+        return out
+    }
 
     private fun fragment(body: String, words: List<String>): List<Map<String, Any>> {
         val plain = body.replace(Regex("<[^>]*>"), " ")

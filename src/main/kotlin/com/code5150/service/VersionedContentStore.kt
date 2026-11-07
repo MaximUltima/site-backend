@@ -346,7 +346,8 @@ class VersionedContentStore(private val pool: PgPool) {
             val data = version.data
             if (version.kind == "news" || version.kind == "articles") data["readingTime"] = readingMinutes(data)
             if (shared != null) {
-                for (key in listOf("categories", "authors")) {
+                // related — как рубрики и авторы: общий для языков, берётся из русской версии.
+                for (key in listOf("categories", "authors", "related")) {
                     if (shared.data.containsKey(key)) data[key] = shared.data[key] else data.remove(key)
                 }
             }

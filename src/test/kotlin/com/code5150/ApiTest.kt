@@ -183,6 +183,102 @@ class ApiTest {
     }
 
     @Test
+    fun `ручная подборка related задаёт порядок, limit и пропуск недоступного`() {
+        val older = slug("rel-older")
+        val newer = slug("rel-newer")
+        val middle = slug("rel-middle")
+        save("articles", older, "Старая", extra = mapOf("publishedAt" to OffsetDateTime.now().minusDays(3).toString()))
+        save("news", newer, "Новая")
+        save("articles", middle, "Средняя")
+        val draft = slug("rel-draft")
+        save("articles", draft, "Черновик", status = "DRAFT")
+        val off = slug("rel-off")
+        save("articles", off, "Снятая")
+        admin().post("/api/admin/v1/articles/$off/unpublish").then().statusCode(200)
+
+        val source = slug("rel-source")
+        save(
+            "articles", source, "Источник",
+            extra = mapOf(
+                "related" to listOf(
+                    mapOf("kind" to "articles", "slug" to "$source-missing"),
+                    mapOf("kind" to "articles", "slug" to draft),
+                    mapOf("kind" to "articles", "slug" to off),
+                    mapOf("kind" to "articles", "slug" to older),
+                    mapOf("kind" to "news", "slug" to newer),
+                    mapOf("kind" to "articles", "slug" to middle),
+                    mapOf("kind" to "articles", "slug" to source),
+                ),
+            ),
+        )
+
+        // Порядок ручной (не по дате), недоступное пропущено, limit обрезает уже после фильтра.
+        given().get("/api/v1/related/$source?kind=article&limit=2").then().statusCode(200)
+            .body("size()", equalTo(2))
+            .body("[0].slug", equalTo(older)).body("[0].kind", equalTo("article"))
+            .body("[1].slug", equalTo(newer)).body("[1].kind", equalTo("news"))
+        // Внутреннее поле не утекает в публичную статью.
+        given().get("/api/v1/articles/$source").then().statusCode(200).body("related", nullValue())
+        admin().get("/api/admin/v1/one/articles/$source").then().statusCode(200)
+            .body("data.related.size()", equalTo(7))
+    }
+
+    @Test
+    fun `related в админском API проверяется на форму, лимит, повторы и чужой вид`() {
+        fun bad(extra: Map<String, Any?>) {
+            admin().body(
+                mapOf("slug" to slug("rel-bad"), "title" to "Плохая", "status" to "PUBLISHED") + extra,
+            ).post("/api/admin/v1/articles").then().statusCode(400).body("error", equalTo("bad_related"))
+        }
+        bad(mapOf("related" to "строка"))
+        bad(mapOf("related" to listOf(mapOf("kind" to "videos", "slug" to "x"))))
+        bad(mapOf("related" to listOf(mapOf("kind" to "articles", "slug" to "Плохой Slug"))))
+        bad(
+            mapOf(
+                "related" to listOf(
+                    mapOf("kind" to "articles", "slug" to "a"),
+                    mapOf("kind" to "articles", "slug" to "a"),
+                ),
+            ),
+        )
+        bad(mapOf("related" to (1..11).map { mapOf("kind" to "articles", "slug" to "s$it") }))
+        bad(mapOf("related" to listOf(mapOf("url" to "http://example.org/x", "title" to "Ссылка"))))
+        bad(mapOf("related" to listOf(mapOf("url" to "https://example.org/x"))))
+        bad(mapOf("related" to listOf(mapOf("url" to "https://example.org/x", "title" to "Ссылка", "announce" to "a".repeat(1001)))))
+    }
+
+    @Test
+    fun `внешние ссылки в related и поиск материалов для админки`() {
+        val target = slug("ext-target")
+        save("articles", target, "Целевая статья про профсоюзы")
+        val draft = slug("ext-draft")
+        save("articles", draft, "Черновик про профсоюзы", status = "DRAFT")
+
+        val found = admin().get("/api/admin/v1/search?q=профсоюзы").then().statusCode(200)
+            .extract().jsonPath().getList<Map<String, Any?>>("")
+        assert(found.any { it["slug"] == target && it["live"] == true })
+        assert(found.any { it["slug"] == draft && it["status"] == "draft" })
+        assert(found.first()["slug"] == target) { "опубликованное должно быть выше черновика" }
+        admin().get("/api/admin/v1/search?q=").then().statusCode(200).body("size()", equalTo(0))
+        admin().get("/api/admin/v1/search?q=профсоюзы&limit=1").then().statusCode(200).body("size()", equalTo(1))
+
+        val source = slug("ext-source")
+        save(
+            "articles", source, "Источник со ссылкой",
+            extra = mapOf(
+                "related" to listOf(
+                    mapOf("kind" to "articles", "slug" to target),
+                    mapOf("url" to "https://example.org/report", "title" to "Доклад", "announce" to "Внешний материал"),
+                ),
+            ),
+        )
+        given().get("/api/v1/related/$source?kind=article").then().statusCode(200)
+            .body("[0].slug", equalTo(target))
+            .body("[1].kind", equalTo("link")).body("[1].url", equalTo("https://example.org/report"))
+            .body("[1].title", equalTo("Доклад")).body("[1].announce", equalTo("Внешний материал"))
+    }
+
+    @Test
     fun `preview принимает только верный HMAC и отдаёт draft`() {
         val slug = slug("preview")
         val version = save(slug = slug, title = "Секретный черновик", status = "DRAFT")

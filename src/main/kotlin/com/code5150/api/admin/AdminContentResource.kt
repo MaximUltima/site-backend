@@ -62,6 +62,7 @@ class AdminContentResource(
         if (source != null && (source !is String || !SOURCE_RE.matches(source))) {
             throw ContractException(400, "bad_source", "Неверный ключ источника")
         }
+        validateRelated(kind, body["related"])
         checkFields(body)
         if (source is String) {
             val seen = store.findBySource(kind, slug, lang, source)
@@ -162,6 +163,42 @@ class AdminContentResource(
                 }
         }
         return mapOf("lang" to lang, "items" to items)
+    }
+
+    /**
+     * Поиск материалов для подборок («Ещё по теме»): по вхождению в заголовок или анонс,
+     * включая черновики. Сначала опубликованные, затем свежие.
+     */
+    @GET
+    @Path("/search")
+    suspend fun search(
+        @QueryParam("q") q: String?,
+        @QueryParam("kind") kind: String?,
+        @QueryParam("limit") limit: Int?,
+    ): List<Map<String, Any?>> {
+        val query = q.orEmpty().trim().lowercase().replace('ё', 'е').take(100)
+        if (query.isEmpty()) return emptyList()
+        val kinds = if (kind == "articles" || kind == "news") listOf(kind) else listOf("articles", "news")
+        val n = (limit ?: 20).coerceIn(1, 50)
+        return kinds
+            .flatMap { k ->
+                store.docs(k, VersionedContentStore.DEFAULT_LANG).mapNotNull { doc ->
+                    val data = doc["data"] as? Map<*, *> ?: return@mapNotNull null
+                    val haystack = (data["title"].orEmptyString() + " " + data["announce"].orEmptyString())
+                        .lowercase().replace('ё', 'е')
+                    if (!haystack.contains(query)) return@mapNotNull null
+                    mapOf(
+                        "kind" to k, "slug" to doc["slug"], "title" to data["title"],
+                        "announce" to data["announce"], "status" to doc["status"],
+                        "live" to (doc["live"] == true), "id" to doc["id"],
+                    )
+                }
+            }
+            .sortedWith(
+                compareByDescending<Map<String, Any?>> { it["live"] == true }
+                    .thenByDescending { (it["id"] as? Number)?.toLong() ?: 0L },
+            )
+            .take(n)
     }
 
     @POST
@@ -309,18 +346,66 @@ class AdminContentResource(
         }
     }
 
+    /**
+     * «Ещё по теме»: ручная подборка только у статей и новостей, до MAX_RELATED.
+     * Элементы — ссылка на материал {kind: articles|news, slug} или внешняя
+     * {url: https://…, title, announce?}; повторов нет. Существование материалов
+     * не проверяем: цель может быть ещё черновиком; недоступное отсеет выдача /related.
+     */
+    private fun validateRelated(kind: String, raw: Any?) {
+        if (raw == null) return
+        if (kind != "articles" && kind != "news")
+            throw ContractException(400, "bad_related", "Поле «related» есть только у статей и новостей.")
+        val list = raw as? List<*> ?: throw ContractException(400, "bad_related", "«Ещё по теме»: ожидается список.")
+        if (list.size > MAX_RELATED)
+            throw ContractException(400, "bad_related", "«Ещё по теме»: не больше $MAX_RELATED материалов.")
+        val seen = HashSet<String>()
+        for (item in list) {
+            val map = item as? Map<*, *>
+                ?: throw ContractException(400, "bad_related", "«Ещё по теме»: ссылка вида {kind, slug} или {url, title}.")
+            val url = map["url"]
+            if (url != null) {
+                if (url !is String || url.length > 500 || !EXTERNAL_URL_RE.matches(url))
+                    throw ContractException(400, "bad_related", "«Ещё по теме»: внешняя ссылка — только https://.")
+                val title = map["title"]
+                if (title !is String || title.isBlank() || title.length > 300)
+                    throw ContractException(400, "bad_related", "«Ещё по теме»: у внешней ссылки нужно название.")
+                val announce = map["announce"]
+                if (announce != null && (announce !is String || announce.length > 1000))
+                    throw ContractException(400, "bad_related", "«Ещё по теме»: описание слишком длинное.")
+                if (!seen.add("url:$url"))
+                    throw ContractException(400, "bad_related", "«Ещё по теме»: повторы.")
+                continue
+            }
+            val refKind = map["kind"]?.toString()
+            val slug = map["slug"]?.toString()
+            if ((refKind != "articles" && refKind != "news") || slug == null || !SLUG_RE.matches(slug))
+                throw ContractException(400, "bad_related", "«Ещё по теме»: ссылка вида {kind, slug} или {url, title}.")
+            val refTitle = map["title"]
+            if (refTitle != null && (refTitle !is String || refTitle.length > 300))
+                throw ContractException(400, "bad_related", "«Ещё по теме»: название слишком длинное.")
+            val refAnnounce = map["announce"]
+            if (refAnnounce != null && (refAnnounce !is String || refAnnounce.length > 1000))
+                throw ContractException(400, "bad_related", "«Ещё по теме»: описание слишком длинное.")
+            if (!seen.add("$refKind/$slug"))
+                throw ContractException(400, "bad_related", "«Ещё по теме»: повторы.")
+        }
+    }
+
     private fun Any?.orEmptyString(): String = this?.toString() ?: ""
 
     companion object {
         private val SLUG_RE = Regex("^[a-z0-9][a-z0-9-]{0,119}$")
+        private val EXTERNAL_URL_RE = Regex("^https://[^\\s\"'<>`]+$", RegexOption.IGNORE_CASE)
         private val SOURCE_RE = Regex("^[a-z][a-z0-9:/.\\-_]{2,199}$", RegexOption.IGNORE_CASE)
         private val ACTOR_RE = Regex("^[a-z0-9][a-z0-9._-]{0,31}$", RegexOption.IGNORE_CASE)
         private const val FIELD_MAX_DEFAULT = 40_000
+        private const val MAX_RELATED = 10
         private val FIELD_MAX = mapOf(
             "slug" to 120, "title" to 300, "announce" to 1000, "lead" to 1000, "body" to 200_000,
             "name" to 120, "number" to 20, "description" to 3000, "bio" to 1500, "url" to 500,
             "pdfUrl" to 500, "buyUrl" to 500, "shopUrl" to 500, "cover" to 500, "preview" to 500,
-            "files" to 400_000, "annotations" to 400_000, "publishedAt" to 40,
+            "files" to 400_000, "annotations" to 400_000, "related" to 20_000, "publishedAt" to 40,
         )
     }
 }
