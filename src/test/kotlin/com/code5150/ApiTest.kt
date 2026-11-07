@@ -378,6 +378,105 @@ class ApiTest {
     }
 
     @Test
+    fun `delete прячет материал на всех языках, отменяет расписание и остаётся в цепочке`() {
+        val slug = slug("delete")
+        save(slug = slug, title = "Удаляемая новость")
+        save(slug = slug, title = "Deleted news", lang = "en")
+        save(slug = slug, title = "Черновик правки", status = "DRAFT")
+        admin().body(mapOf("at" to OffsetDateTime.now().plusDays(1).toString()))
+            .post("/api/admin/v1/news/$slug/schedule").then().statusCode(200)
+
+        admin().post("/api/admin/v1/news/$slug/delete").then().statusCode(200)
+            .body("deleted", equalTo(true)).body("langs", hasSize<Any>(2)).body("versions", hasSize<Any>(2))
+
+        given().get("/api/v1/news/$slug").then().statusCode(404)
+        given().get("/api/v1/news/$slug?lang=en").then().statusCode(404)
+        admin().get("/api/admin/v1/docs/news").then().statusCode(200)
+            .body("items.find { it.slug == '$slug' }.data.deleted", equalTo(true))
+            .body("items.find { it.slug == '$slug' }.off", equalTo(true))
+        admin().get("/api/admin/v1/search?q=Удаляемая").then().statusCode(200).body("size()", equalTo(0))
+        admin().get("/api/admin/v1/scheduled").then().statusCode(200).body("items.slug", not(hasItem(slug)))
+        admin().get("/api/admin/v1/news/$slug/versions").then().statusCode(200).body("status", hasItem("unpublished"))
+        admin().get("/api/admin/v1/journal/verify").then().statusCode(200)
+            .body("broken", hasSize<Any>(0)).body("gaps", hasSize<Any>(0))
+
+        admin().post("/api/admin/v1/news/${slug("gone")}/delete").then().statusCode(404)
+            .body("error", equalTo("not_found"))
+    }
+
+    @Test
+    fun `move переносит статью в новость с версиями, расписанием и ссылками`() {
+        val category = slug("move-cat")
+        save("categories", category, "Рубрика", extra = mapOf("position" to 1))
+        val moved = slug("move")
+        save("articles", moved, "Переносимая статья", extra = mapOf("categories" to listOf(category)))
+        save("articles", moved, "Правка поверх публикации", status = "DRAFT")
+        save("articles", moved, "Moved article", lang = "en")
+        val ref = slug("move-ref")
+        save(
+            "articles", ref, "Ссылающаяся статья",
+            extra = mapOf("related" to listOf(mapOf("kind" to "articles", "slug" to moved))),
+        )
+        admin().body(mapOf("at" to OffsetDateTime.now().plusDays(1).toString()))
+            .post("/api/admin/v1/articles/$moved/schedule").then().statusCode(200)
+
+        admin().body(mapOf("to" to "news")).post("/api/admin/v1/articles/$moved/move").then().statusCode(200)
+            .body("from", equalTo("articles")).body("kind", equalTo("news"))
+            .body("moved", equalTo(true)).body("versions.size()", greaterThan(0))
+
+        given().get("/api/v1/articles/$moved").then().statusCode(404)
+        given().get("/api/v1/news/$moved").then().statusCode(200)
+            .body("title", equalTo("Переносимая статья")).body("categories[0].title", equalTo("Рубрика"))
+        given().get("/api/v1/news/$moved?lang=en").then().statusCode(200).body("title", equalTo("Moved article"))
+        admin().get("/api/admin/v1/docs/news").then().statusCode(200)
+            .body("items.find { it.slug == '$moved' }.status", equalTo("draft"))
+            .body("items.find { it.slug == '$moved' }.live", equalTo(true))
+        admin().get("/api/admin/v1/docs/articles").then().statusCode(200)
+            .body("items.find { it.slug == '$moved' }.data.deleted", equalTo(true))
+        admin().get("/api/admin/v1/scheduled").then().statusCode(200)
+            .body("items.findAll { it.slug == '$moved' }.size()", equalTo(1))
+            .body("items.find { it.slug == '$moved' }.kind", equalTo("news"))
+        given().get("/api/v1/related/$ref?kind=article").then().statusCode(200)
+            .body("[0].slug", equalTo(moved)).body("[0].kind", equalTo("news"))
+        admin().get("/api/admin/v1/one/articles/$ref").then().statusCode(200)
+            .body("data.related[0].kind", equalTo("news"))
+        admin().get("/api/admin/v1/journal/verify").then().statusCode(200)
+            .body("broken", hasSize<Any>(0)).body("gaps", hasSize<Any>(0))
+
+        // Обратно: надгробие в исходном виде не мешает вернуть материал.
+        admin().body(mapOf("to" to "articles")).post("/api/admin/v1/news/$moved/move").then().statusCode(200)
+        given().get("/api/v1/articles/$moved").then().statusCode(200).body("title", equalTo("Переносимая статья"))
+        given().get("/api/v1/news/$moved").then().statusCode(404)
+        admin().get("/api/admin/v1/one/articles/$ref").then().statusCode(200)
+            .body("data.related[0].kind", equalTo("articles"))
+        admin().get("/api/admin/v1/scheduled").then().statusCode(200)
+            .body("items.find { it.slug == '$moved' }.kind", equalTo("articles"))
+
+        val clash = slug("move-clash")
+        save("articles", clash, "Занятая статья")
+        save("news", clash, "Занятая новость")
+        admin().body(mapOf("to" to "news")).post("/api/admin/v1/articles/$clash/move").then().statusCode(409)
+            .body("error", equalTo("target_exists"))
+        admin().body(mapOf("to" to "videos")).post("/api/admin/v1/articles/$clash/move").then().statusCode(400)
+            .body("error", equalTo("bad_move"))
+        admin().body(mapOf("to" to "articles")).post("/api/admin/v1/articles/$clash/move").then().statusCode(400)
+            .body("error", equalTo("bad_move"))
+        admin().body(mapOf("to" to "news")).post("/api/admin/v1/videos/$clash/move").then().statusCode(400)
+            .body("error", equalTo("bad_move"))
+        admin().body(mapOf("to" to "news")).post("/api/admin/v1/articles/${slug("gone")}/move").then().statusCode(404)
+    }
+
+    @Test
+    fun `дату публикации можно задать вручную`() {
+        val slug = slug("dated")
+        save(slug = slug, extra = mapOf("publishedAt" to "2001-02-03T04:05:06+03:00"))
+        given().get("/api/v1/news/$slug").then().statusCode(200)
+            .body("publishedAt", equalTo("2001-02-03T04:05:06+03:00"))
+        given().get("/api/v1/news?size=100").then().statusCode(200)
+            .body("items.find { it.slug == '$slug' }.publishedAt", equalTo("2001-02-03T04:05:06+03:00"))
+    }
+
+    @Test
     fun `support сохраняется versioned JSON и публикуется сразу`() {
         admin().body(mapOf("wallets" to listOf(mapOf("network" to "BTC", "address" to "bc1qtest")), "shopUrl" to "https://shop.example"))
             .put("/api/admin/v1/support").then().statusCode(200).body("status", equalTo("published"))

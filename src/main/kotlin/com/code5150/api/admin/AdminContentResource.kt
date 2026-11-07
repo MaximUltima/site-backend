@@ -123,6 +123,52 @@ class AdminContentResource(
         return version.toMap()
     }
 
+    /**
+     * Удаление материала целиком: новой версией `unpublished` с `data.deleted = true`
+     * для каждого языка. Материал пропадает с сайта и из списков админки, но версии
+     * остаются в журнале — удаление видно и восстановимо через историю.
+     */
+    @POST
+    @Path("/{kind}/{slug}/delete")
+    suspend fun delete(
+        @PathParam("kind") kind: String,
+        @PathParam("slug") slug: String,
+        @QueryParam("actor") actor: String?,
+    ): Map<String, Any?> {
+        VersionedContentStore.checkKind(kind)
+        val result = store.delete(kind, slug, actor(actor))
+        revalidate(result.kind, result.slug)
+        return linkedMapOf(
+            "kind" to result.kind, "slug" to result.slug, "deleted" to true, "langs" to result.langs,
+            "versions" to result.versions.map { it.id },
+        )
+    }
+
+    /** Перенос статьи в новости и наоборот: копии всех версий, надгробие, расписание и ссылки. */
+    @POST
+    @Path("/{kind}/{slug}/move")
+    @Consumes(MediaType.APPLICATION_JSON)
+    suspend fun move(
+        @PathParam("kind") kind: String,
+        @PathParam("slug") slug: String,
+        @QueryParam("actor") actor: String?,
+        body: Map<String, Any?>?,
+    ): Map<String, Any?> {
+        val to = body?.get("to")?.toString()
+        if (kind != "articles" && kind != "news")
+            throw ContractException(400, "bad_move", "Переносить можно только статьи и новости.")
+        if (to != "articles" && to != "news")
+            throw ContractException(400, "bad_move", "Целевой раздел — статьи или новости.")
+        if (to == kind) throw ContractException(400, "bad_move", "Материал уже в этом разделе.")
+        val result = store.move(kind, slug, to, actor(actor))
+        revalidate(result.from, result.slug)
+        revalidate(result.kind, result.slug)
+        return linkedMapOf(
+            "from" to result.from, "kind" to result.kind, "slug" to result.slug,
+            "moved" to true, "versions" to result.versions.map { it.id },
+        )
+    }
+
     @GET
     @Path("/docs/{kind}")
     suspend fun docs(@PathParam("kind") kind: String, @QueryParam("lang") lang: String?): Map<String, Any?> {
@@ -189,6 +235,7 @@ class AdminContentResource(
             .flatMap { k ->
                 store.docs(k, VersionedContentStore.DEFAULT_LANG).mapNotNull { doc ->
                     val data = doc["data"] as? Map<*, *> ?: return@mapNotNull null
+                    if (data["deleted"] == true) return@mapNotNull null
                     val haystack = (data["title"].orEmptyString() + " " + data["announce"].orEmptyString())
                         .lowercase().replace('ё', 'е')
                     if (!haystack.contains(query)) return@mapNotNull null

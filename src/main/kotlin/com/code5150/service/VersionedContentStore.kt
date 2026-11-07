@@ -62,6 +62,8 @@ private fun Row.version() = VersionRow(
     getString("data"), getString("actor"), getString("created_at"), getString("prev_hash"), getString("hash"),
 )
 
+data class DeleteResult(val kind: String, val slug: String, val langs: List<String>, val versions: List<VersionRow>)
+data class MoveResult(val from: String, val kind: String, val slug: String, val versions: List<VersionRow>)
 data class PublicationMeta(val first: String?, val last: String?, val count: Long, val actor: String?)
 data class ScheduleRow(
     val id: Long,
@@ -132,6 +134,161 @@ class VersionedContentStore(private val pool: PgPool) {
     suspend fun publish(id: Long, actor: String): VersionRow? {
         val old = version(id) ?: return null
         return save(old.kind, old.slug, old.data, "published", old.lang, actor)
+    }
+
+    /**
+     * Удаление материала в append-only хранилище: для каждого языка, где были версии,
+     * добавляется версия `unpublished` с пометкой `data.deleted = true` (надгробие).
+     * Материал пропадает с сайта и из списков админки, версии остаются в журнале.
+     * Ожидающая публикация отменяется.
+     */
+    suspend fun delete(kind: String, slug: String, actor: String): DeleteResult {
+        checkKind(kind)
+        val rows = versionsOf(kind, slug)
+        if (rows.isEmpty()) throw ContractException(404, "not_found", "Такого материала нет")
+        val langs = rows.map { it.lang }.distinct()
+        val tombstones = langs.associateWith { lang -> rawWithDeleted(rows.last { it.lang == lang }.rawData) }
+        val now = isoNow()
+        val created = pool.withTransaction { connection ->
+            var work: Uni<MutableList<VersionRow>> = Uni.createFrom().item(mutableListOf())
+            for (lang in langs) {
+                work = work.flatMap { acc ->
+                    append(connection, kind, slug, tombstones.getValue(lang), "unpublished", lang, actor, now)
+                        .map { acc += it; acc }
+                }
+            }
+            work.flatMap { acc ->
+                connection.preparedQuery(
+                    "UPDATE content_schedule SET state = 'canceled' WHERE kind = $1 AND slug = $2 AND state = 'pending'",
+                ).execute(dbTuple(kind, slug)).map { acc }
+            }
+        }.awaitSuspending()
+        return DeleteResult(kind, slug, langs, created)
+    }
+
+    /**
+     * Перенос материала между статьями и новостями: все версии копируются в целевой вид
+     * (данные, статусы, авторы и даты сохраняются), исходный вид получает надгробие,
+     * ожидающее расписание переезжает на копию, ссылки в `related` других материалов
+     * переводятся на новый вид. Slug в целевом виде не должен быть занят живым материалом.
+     */
+    suspend fun move(kind: String, slug: String, target: String, actor: String): MoveResult {
+        checkKind(kind)
+        checkKind(target)
+        val rows = versionsOf(kind, slug)
+        if (rows.isEmpty()) throw ContractException(404, "not_found", "Такого материала нет")
+        // Конфликт — только живой материал: надгробие удалённого не мешает перенести обратно.
+        val blocked = versionsOf(target, slug).groupBy { it.lang }
+            .any { (_, langRows) -> langRows.last().data["deleted"] != true }
+        if (blocked)
+            throw ContractException(409, "target_exists", "В разделе, куда переносим, уже есть материал с таким адресом")
+        val langs = rows.map { it.lang }.distinct()
+        val tombstones = langs.associateWith { lang -> rawWithDeleted(rows.last { it.lang == lang }.rawData) }
+        val now = isoNow()
+        val created = pool.withTransaction { connection ->
+            var work: Uni<MutableList<Pair<Long, VersionRow>>> = Uni.createFrom().item(mutableListOf())
+            for (row in rows) {
+                work = work.flatMap { acc ->
+                    append(connection, target, slug, row.rawData, row.status, row.lang, row.actor ?: "api", row.createdAt)
+                        .map { copied -> acc += row.id to copied; acc }
+                }
+            }
+            work.flatMap { acc ->
+                var tombstoneWork: Uni<MutableList<Pair<Long, VersionRow>>> = Uni.createFrom().item(acc)
+                for (lang in langs) {
+                    tombstoneWork = tombstoneWork.flatMap { map ->
+                        append(connection, kind, slug, tombstones.getValue(lang), "unpublished", lang, actor, now)
+                            .map { map += 0L to it; map }
+                    }
+                }
+                tombstoneWork.flatMap { map ->
+                    connection.preparedQuery(
+                        "SELECT * FROM content_schedule WHERE kind = $1 AND slug = $2 AND state = 'pending'",
+                    ).execute(dbTuple(kind, slug)).flatMap { pending ->
+                        var scheduleWork: Uni<MutableList<Pair<Long, VersionRow>>> = Uni.createFrom().item(map)
+                        for (row in pending) {
+                            val schedule = row.schedule()
+                            val copiedId = map.firstOrNull { it.first == schedule.versionId }?.second?.id
+                            scheduleWork = scheduleWork.flatMap { accMap ->
+                                connection.preparedQuery("UPDATE content_schedule SET state = 'canceled' WHERE id = $1")
+                                    .execute(dbTuple(schedule.id)).flatMap { _ ->
+                                        if (copiedId == null) Uni.createFrom().item(accMap)
+                                        else connection.preparedQuery(
+                                            "INSERT INTO content_schedule (version_id, kind, slug, lang, publish_at, by_actor, created_at) " +
+                                                "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                                        ).execute(
+                                            dbTuple(copiedId, target, slug, schedule.lang, schedule.publishAt, schedule.byActor, now),
+                                        ).map { accMap }
+                                    }
+                            }
+                        }
+                        scheduleWork
+                    }
+                }
+            }
+        }.awaitSuspending()
+        val fixes = fixRelatedRefs(kind, slug, target, actor)
+        return MoveResult(kind, target, slug, created.map { it.second } + fixes)
+    }
+
+    private suspend fun versionsOf(kind: String, slug: String): List<VersionRow> =
+        pool.preparedQuery("SELECT * FROM content_versions WHERE kind = $1 AND slug = $2 ORDER BY id")
+            .execute(dbTuple(kind, slug)).awaitSuspending().map { it.version() }
+
+    /**
+     * Тот же материал в ссылках «Ещё по теме» других статей и новостей: меняем вид
+     * у целей, которые указывают на перенесённый материал. Правятся оба слоя —
+     * опубликованный и черновик поверх него, — чтобы сайт и админка не разошлись.
+     * Возвращает созданные версии: их записывает в журнал админка.
+     */
+    private suspend fun fixRelatedRefs(from: String, slug: String, to: String, actor: String): List<VersionRow> {
+        val made = mutableListOf<VersionRow>()
+        for (docKind in listOf("articles", "news")) {
+            for (doc in docs(docKind, DEFAULT_LANG)) {
+                val docSlug = doc["slug"]?.toString() ?: continue
+                val data = doc["data"] as? Map<*, *> ?: continue
+                if (data["deleted"] == true) continue
+                if (docKind == from && docSlug == slug) continue
+                val related = data["related"] as? List<*> ?: continue
+                val refers = related.any {
+                    val map = it as? Map<*, *>
+                    map != null && map["kind"]?.toString() == from && map["slug"]?.toString() == slug
+                }
+                if (!refers) continue
+                val rows = versionsOf(docKind, docSlug).filter { it.lang == DEFAULT_LANG }
+                val latest = rows.lastOrNull() ?: continue
+                val live = rows.lastOrNull { it.status != "draft" }
+                val targets = if (live == null || live.id == latest.id) listOf(latest) else listOf(live, latest)
+                for (row in targets) {
+                    val fixedRaw = rawWithRelated(row.rawData, from, slug, to) ?: continue
+                    made += save(docKind, docSlug, parseData(fixedRaw), row.status, DEFAULT_LANG, actor)
+                }
+            }
+        }
+        return made
+    }
+
+    private fun parseData(raw: String): MutableMap<String, Any?> = contentJson.readValue(
+        raw, contentJson.typeFactory.constructMapType(LinkedHashMap::class.java, String::class.java, Any::class.java),
+    )
+
+    private fun rawWithDeleted(raw: String): String =
+        contentJson.writeValueAsString(parseData(raw).also { it["deleted"] = true })
+
+    private fun rawWithRelated(raw: String, from: String, slug: String, to: String): String? {
+        val data = parseData(raw)
+        val related = data["related"] as? List<*> ?: return null
+        var changed = false
+        val fixed = related.map { item ->
+            val map = item as? Map<*, *>
+            if (map != null && map["kind"]?.toString() == from && map["slug"]?.toString() == slug) {
+                changed = true
+                map.toMutableMap().also { it["kind"] = to }
+            } else item
+        }
+        if (!changed) return null
+        data["related"] = fixed
+        return contentJson.writeValueAsString(data)
     }
 
     suspend fun publicationMeta(kind: String, slug: String, lang: String): PublicationMeta =
